@@ -26,10 +26,11 @@ only runs under `vite dev`.
 
 Use extract_curves to pull all performance chart from FM.
 Usage :
+```
     python3 extract_curves.py [PDF]               # all (parse + SVGZ, svgo)
     python3 extract_curves.py [PDF] --list-only   # only chart catalog
     python3 extract_curves.py [PDF] --precision 3 # 3 decimal coords
     python3 extract_curves.py [PDF] --no-svgo     # disable svgo 
     python3 extract_curves.py [PDF] --svg         # plain SVG (no gzip)
-
+```
 **Todo : add the RDP algorithm, reduces definition by 98%, most curves are almost linear**
