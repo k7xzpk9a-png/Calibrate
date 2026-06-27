@@ -11,10 +11,6 @@ npm run dev      # open http://localhost:5173
 
 ## Data
 
-`static/lookup.json` and `static/svgz/` are **symlinks** into the main project
-(`../nh90-svelte/static/...`), so tags you save here land directly in the app —
-one source of truth. To make this copy fully independent instead, replace the
-symlinks with real copies:
 
 ```
 rm static/lookup.json static/svgz
@@ -24,3 +20,16 @@ cp -r ../nh90-svelte/static/svgz static/
 
 Dev-only: the `/calibrate/save` endpoint writes `static/lookup.json` on disk and
 only runs under `vite dev`.
+
+
+## Scripts
+
+Use extract_curves to pull all performance chart from FM.
+Usage :
+    python3 extract_curves.py [PDF]               # all (parse + SVGZ, svgo)
+    python3 extract_curves.py [PDF] --list-only   # only chart catalog
+    python3 extract_curves.py [PDF] --precision 3 # 3 decimal coords
+    python3 extract_curves.py [PDF] --no-svgo     # disable svgo 
+    python3 extract_curves.py [PDF] --svg         # plain SVG (no gzip)
+
+**Todo : add the RDP algorithm, reduces definition by 98%, most curves are almost linear**
