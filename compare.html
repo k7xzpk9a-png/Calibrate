@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<meta charset="utf-8">
+<title>9-131 curve compare</title>
+<style>
+  body{font:13px system-ui,sans-serif;margin:0;display:flex;height:100vh}
+  #side{width:230px;padding:14px;box-sizing:border-box;border-right:1px solid #ddd;overflow:auto}
+  #stage{flex:1;position:relative;overflow:hidden;background:#f7f7f7;display:flex;justify-content:center;align-items:flex-start;cursor:grab}
+  #stage.drag{cursor:grabbing}
+  #wrap{position:relative;height:100%;aspect-ratio:595.28/841.89;max-width:100%}
+  #gt,#overlay{position:absolute;top:0;left:0;width:100%;height:100%}
+  #wrap svg{display:block;width:100%;height:100%}
+  #overlay{pointer-events:none}
+  label{display:block;margin:6px 0}
+  .sw{display:inline-block;width:11px;height:11px;border-radius:2px;vertical-align:middle;margin-right:5px}
+  h3{margin:14px 0 4px;font-size:12px;text-transform:uppercase;letter-spacing:.5px;color:#666}
+  input[type=range]{width:100%}
+  #eps{font-variant-numeric:tabular-nums}
+  .count{color:#555;font-size:12px}
+  #status{color:#a00}
+</style>
+<div id="side">
+  <h3>Figure</h3>
+  <input type="file" id="pick" accept=".svgz,.gz">
+  <div class="count">current: <b id="figname">…</b></div>
+  <h3>Layers</h3>
+  <label><input type="checkbox" id="t_gt" checked> <span class="sw" style="background:#000"></span>SVG ground truth</label>
+  <label><input type="checkbox" id="t_dat" checked> <span class="sw" style="background:#e11"></span>.dat + graph_data</label>
+  <label><input type="checkbox" id="t_look" checked> <span class="sw" style="background:#0a0"></span>lookup.json</label>
+  <label><input type="checkbox" id="t_rdp" checked> <span class="sw" style="background:#06f"></span>lookup + RDP</label>
+  <h3>RDP epsilon (viewBox units)</h3>
+  <input type="range" id="slider" min="0" max="1.5" step="0.001" value="0.05">
+  <div>ε = <b id="eps">0.050</b></div>
+  <h3>Points</h3>
+  <div class="count" id="counts">…</div>
+  <h3 id="status"></h3>
+</div>
+<div id="stage"><div id="wrap">
+  <div id="gt"></div>
+  <svg id="overlay" viewBox="0 0 595.28 841.89"></svg>
+</div></div>
+
+<script>
+let FIG = '9-131';                 // current figure id; the picker sets it
+// pixel(scan, from graph_data) -> viewBox(svg). Fitted ~300dpi map, rmse<0.5vb.
+const PX2VB = { ax:0.239805, bx:0.6109, ay:0.238827, by:1.7678 };
+
+const $ = id => document.getElementById(id);
+const overlay = $('overlay');
+
+async function gunzip(buf){
+  const ds = new DecompressionStream('gzip');
+  const s  = new Blob([buf]).stream().pipeThrough(ds);
+  return await new Response(s).arrayBuffer();
+}
+
+// --- SVG path -> vertices (handles M m L l H h V v) ---
+function pathPoints(d){
+  const t = d.match(/[MmLlHhVvZz]|-?\d*\.?\d+/g);
+  let i=0,x=0,y=0,cmd=null,pts=[];
+  const n=()=>parseFloat(t[i++]);
+  while(i<t.length){
+    if(/[A-Za-z]/.test(t[i])) cmd=t[i++];
+    if(cmd==='Z'||cmd==='z'){continue;}
+    if(cmd==='M'){x=n();y=n();pts.push([x,y]);cmd='L';}
+    else if(cmd==='m'){x+=n();y+=n();pts.push([x,y]);cmd='l';}
+    else if(cmd==='L'){x=n();y=n();pts.push([x,y]);}
+    else if(cmd==='l'){x+=n();y+=n();pts.push([x,y]);}
+    else if(cmd==='H'){x=n();pts.push([x,y]);}
+    else if(cmd==='h'){x+=n();pts.push([x,y]);}
+    else if(cmd==='V'){y=n();pts.push([x,y]);}
+    else if(cmd==='v'){y+=n();pts.push([x,y]);}
+    else i++; // skip unknown number
+  }
+  return pts;
+}
+
+// --- Ramer-Douglas-Peucker ---
+function rdp(P,eps){
+  if(P.length<3) return P.slice();
+  const a=P[0], b=P[P.length-1];
+  const dx=b[0]-a[0], dy=b[1]-a[1], L=Math.hypot(dx,dy)||1e-9;
+  let dmax=0, idx=0;
+  for(let i=1;i<P.length-1;i++){
+    const d=Math.abs(dy*(P[i][0]-a[0])-dx*(P[i][1]-a[1]))/L;
+    if(d>dmax){dmax=d;idx=i;}
+  }
+  if(dmax>eps){
+    const l=rdp(P.slice(0,idx+1),eps), r=rdp(P.slice(idx),eps);
+    return l.slice(0,-1).concat(r);
+  }
+  return [a,b];
+}
+
+// --- .dat decode -> curves of (oat,transfer), then -> viewBox ---
+function decodeDat(buf, g){
+  const dv=new DataView(buf), N=buf.byteLength>>1, v=new Array(N);
+  for(let i=0;i<N;i++) v[i]=dv.getInt16(i*2,true);
+  const curves=[];
+  for(let i=0;i<N-4;i++){
+    const zp=v[i+1], npts=v[i+2], oat0=v[i+3];
+    if(oat0!==-40 || npts<30 || npts>200 || zp<-10 || zp>40) continue;
+    const xd=v.slice(i+4, i+4+npts-1);
+    const ys=v.slice(i+4+npts-1, i+4+npts-1+npts);
+    if(ys.length<npts) continue;
+    const xs=[oat0]; for(const d of xd) xs.push(xs[xs.length-1]+d);
+    const yy=[ys[0]]; for(let k=1;k<ys.length;k++) yy.push(yy[yy.length-1]+ys[k]);
+    const pts=[];
+    for(let k=0;k<yy.length;k++){
+      const oat=xs[k], tr=yy[k];
+      const X=g.oatOriginX+(oat-g.oatMin)/(g.oatMax-g.oatMin)*(g.oatMaxX-g.oatOriginX);
+      const Y=g.transferOriginY+(tr-g.transferMin)/(g.transferMax-g.transferMin)*(g.transferMaxY-g.transferOriginY);
+      pts.push([PX2VB.ax*X+PX2VB.bx, PX2VB.ay*Y+PX2VB.by]);
+    }
+    curves.push(pts);
+    //  pure scan, no skip — block lengths vary at high zp; the
+    // (oat0==-40, npts 30-200, zp -10..40) header pattern is specific enough.
+  }
+  return curves;
+}
+
+function poly(pts,color,w){
+  const el=document.createElementNS('http://www.w3.org/2000/svg','polyline');
+  el.setAttribute('points',pts.map(p=>p[0].toFixed(2)+','+p[1].toFixed(2)).join(' '));
+  el.setAttribute('fill','none');
+  el.setAttribute('stroke',color);
+  el.setAttribute('stroke-width',w);
+  el.setAttribute('stroke-opacity','0.85');
+  el.setAttribute('vector-effect','non-scaling-stroke'); // constant px width at any zoom
+  return el;
+}
+
+let DATC=[], LOOK=[], GT_done=false;
+
+function render(){
+  const eps=parseFloat($('slider').value);
+  $('eps').textContent=eps.toFixed(3);
+  $('gt').style.display = $('t_gt').checked ? '' : 'none';
+  overlay.innerHTML='';
+  let pDat=0,pLook=0,pRdp=0;
+  if($('t_dat').checked)  for(const c of DATC){ overlay.appendChild(poly(c,'#e11',1.2)); pDat+=c.length; }
+  if($('t_look').checked) for(const c of LOOK){ overlay.appendChild(poly(c,'#0a0',1.2)); pLook+=c.length; }
+  if($('t_rdp').checked)  for(const c of LOOK){ const r=rdp(c,eps); overlay.appendChild(poly(r,'#06f',1.2)); pRdp+=r.length; }
+  else for(const c of LOOK) pRdp+=rdp(c,eps).length;
+  $('counts').innerHTML =
+    `.dat: <b>${pDat}</b><br>lookup: <b>${pLook}</b><br>`+
+    `lookup+RDP: <b>${pRdp}</b> (${pLook?Math.round(100*pRdp/pLook):0}% of lookup)`;
+}
+
+// big JSONs fetched once and cached so re-picking is cheap
+let LKCACHE=null, GDCACHE=null;
+const getLookup    = async()=> LKCACHE ??= await (await fetch('lookup.json')).json();
+const getGraphData = async()=> GDCACHE ??= await (await fetch('graph_data.json')).json();
+
+// load a figure. svgzBuf: optional ArrayBuffer from the file picker;
+// if absent, fetch <fig>.svgz from the server. Everything else derives from fig.
+async function load(fig, svgzBuf){
+  try{
+    FIG = fig; $('status').textContent=''; $('figname').textContent=fig;
+    // ground truth
+    const buf = svgzBuf || await (await fetch(fig+'.svgz')).arrayBuffer();
+    $('gt').innerHTML = new TextDecoder().decode(await gunzip(buf));
+    const inner = $('gt').querySelector('svg');
+    if(inner){ inner.removeAttribute('width'); inner.removeAttribute('height'); }
+    // overlays — best-effort; a figure may have no tagged curves or no .dat
+    LOOK=[]; DATC=[];
+    const f = (await getLookup()).figs[fig];
+    if(f && f.tagged) LOOK = f.tagged.curves.map(c=>pathPoints(c.d));
+    else $('status').textContent = 'no tagged curves in lookup.json for '+fig;
+    const gd = await getGraphData();
+    const gkey = Object.keys(gd).find(k=>k.startsWith(fig+'_'));
+    const g = gkey ? gd[gkey] : (f && f.graph);
+    if(gkey && g && 'oatOriginX' in g){   // decodeDat is ROC-family only
+      try{
+        const datpath = 'data/'+gkey.replace(/\.png$/,'.dat');   // graph_data key -> .dat
+        DATC = decodeDat(await gunzip(await (await fetch(datpath)).arrayBuffer()), g);
+      }catch(err){ console.warn('no .dat for',fig,err); }
+    }
+    view={x:0,y:0,w:W,h:H}; applyView(); render();
+  }catch(e){
+    $('status').textContent = e.message + ' — serve over http (see README).';
+    console.error(e);
+  }
+}
+
+$('pick').addEventListener('change', async e=>{
+  const file = e.target.files[0]; if(!file) return;
+  const m = file.name.match(/\d+-\d+/);                  // "9-131.svgz" -> "9-131"
+  load(m ? m[0] : file.name.replace(/\.[^.]+$/,''), await file.arrayBuffer());
+});
+['t_gt','t_dat','t_look','t_rdp','slider'].forEach(id=>$(id).addEventListener('input',render));
+
+// --- true vector zoom: drive the SVG viewBox (stays sharp, never rasterised) ---
+const stage=$('stage'), overlayEl=overlay;
+const W=595.28, H=841.89;
+let view={x:0,y:0,w:W,h:H};            // current viewBox in SVG units
+function applyView(){
+  const vb=`${view.x} ${view.y} ${view.w} ${view.h}`;
+  overlayEl.setAttribute('viewBox',vb);
+  const gt=$('gt').querySelector('svg'); if(gt) gt.setAttribute('viewBox',vb);
+}
+function pxToSvg(e){                    // cursor px -> SVG coords
+  const r=overlayEl.getBoundingClientRect();
+  return { x:view.x+(e.clientX-r.left)/r.width*view.w,
+           y:view.y+(e.clientY-r.top)/r.height*view.h, r };
+}
+stage.addEventListener('wheel',e=>{
+  e.preventDefault();
+  const p=pxToSvg(e), f=Math.exp(e.deltaY*0.0015);      // f>1 zoom out
+  const nw=Math.min(W,Math.max(W/200,view.w*f)), nh=nw*(H/W);
+  view={ x:p.x-(e.clientX-p.r.left)/p.r.width*nw,
+         y:p.y-(e.clientY-p.r.top)/p.r.height*nh, w:nw, h:nh };
+  applyView();
+},{passive:false});
+let drag=null;
+stage.addEventListener('pointerdown',e=>{drag={...pxToSvg(e)};stage.classList.add('drag');stage.setPointerCapture(e.pointerId);});
+stage.addEventListener('pointermove',e=>{
+  if(!drag)return;
+  view.x=drag.x-(e.clientX-drag.r.left)/drag.r.width*view.w;
+  view.y=drag.y-(e.clientY-drag.r.top)/drag.r.height*view.h;
+  applyView();
+});
+stage.addEventListener('pointerup',()=>{drag=null;stage.classList.remove('drag');});
+stage.addEventListener('dblclick',()=>{view={x:0,y:0,w:W,h:H};applyView();});
+
+load(FIG);   // initial figure; use the picker to switch
+</script>

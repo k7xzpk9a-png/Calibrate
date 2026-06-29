@@ -33,4 +33,12 @@ Usage :
     python3 extract_curves.py [PDF] --no-svgo     # disable svgo 
     python3 extract_curves.py [PDF] --svg         # plain SVG (no gzip)
 ```
-**Todo : add the RDP algorithm, reduces definition by 98%, most curves are almost linear**
+
+Compress lookup.json by RDP-simplifying every tagged-curve `d` path.
+```
+  python3 rdp_compress.py [epsilon] [decimals]
+```
+
+Reads lookup.json, writes rdp_lookup.json. epsilon is in viewBox units
+(default 0.05 = very small; curves are within a 595x842 page). Only
+`figs[*].tagged.curves[*].d` is touched; everything else is copied verbatim.
