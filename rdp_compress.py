@@ -79,7 +79,7 @@ def emit(pts):
     return p.s
 
 def main():
-    data = json.load(open('lookup.json'))
+    data = json.load(open('static/lookup.json'))
     before = after = pts_before = pts_after = 0
     for f in data['figs'].values():
         for c in f.get('tagged', {}).get('curves', []):
