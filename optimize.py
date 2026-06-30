@@ -1,16 +1,28 @@
 #!/usr/bin/env python3
-"""Compress lookup.json by RDP-simplifying every tagged-curve `d` path.
+"""Optimize lookup.json: RDP-simplify every tagged-curve `d` path AND strip the
+authoring-only tags the runtime app never reads, then minify.
 
-  python3 rdp_compress.py [epsilon] [decimals]
+  python3 optimize.py [epsilon] [decimals]
 
-Reads lookup.json, writes rdp_lookup.json. epsilon is in viewBox units
-(default 0.05 = very small; curves are within a 595x842 page). Only
-`figs[*].tagged.curves[*].d` is touched; everything else is copied verbatim.
+Reads static/lookup.json, writes lookup.optimized.json (minified). epsilon is in
+viewBox units (default 0.05 = very small; curves are within a 595x842 page).
+
+Dropped tags (verified unused by the consumer in nh90-svelte/lookupTable.ts,
+which reads only `curve.<value>` + `curve.d`, plus `tagged.calibration`):
+  • curve.id           — source SVG path index, dead after tagging
+  • tagged.source      — provenance (calibrate/auto)
+  • tagged.fig         — duplicates the figs[<fig>] key
+  • tagged.viewBox     — constant 595.28x841.89, not read at runtime
+Everything else (version/normalise/index, family/name/graph, tagged.curves,
+tagged.calibration, any unknown keys) is copied verbatim.
 """
 import json, re, sys
 
 EPS = float(sys.argv[1]) if len(sys.argv) > 1 else 0.05
 DP  = int(sys.argv[2]) if len(sys.argv) > 2 else 2
+
+CURVE_DROP  = {'id'}
+TAGGED_DROP = {'source', 'fig', 'viewBox'}
 
 # --- SVG path (M m L l H h V v) -> list of absolute (x,y) points ---
 def parse(d):
@@ -79,18 +91,29 @@ def emit(pts):
     return p.s
 
 def main():
-    data = json.load(open('static/lookup.json'))
-    before = after = pts_before = pts_after = 0
+    src = 'static/lookup.json'; out = 'lookup.optimized.json'
+    raw_before = len(open(src, 'rb').read())
+    data = json.load(open(src))
+    before = after = pts_before = pts_after = dropped = 0
     for f in data['figs'].values():
-        for c in f.get('tagged', {}).get('curves', []):
+        t = f.get('tagged')
+        if not t: continue
+        for k in TAGGED_DROP:
+            if k in t: del t[k]; dropped += 1
+        for c in t.get('curves', []):
+            for k in CURVE_DROP:
+                if k in c: del c[k]; dropped += 1
             P = parse(c['d']); S = rdp(P, EPS)
             before += len(c['d']); pts_before += len(P); pts_after += len(S)
             c['d'] = emit(S)
             after += len(c['d'])
-    json.dump(data, open('rdp_lookup.json', 'w'), separators=(',', ':'))
-    print(f'eps={EPS}  decimals={DP}')
+    json.dump(data, open(out, 'w'), separators=(',', ':'))
+    raw_after = len(open(out, 'rb').read())
+    print(f'eps={EPS}  decimals={DP}  ->  {out}')
     print(f'points : {pts_before:,} -> {pts_after:,} ({100*pts_after/pts_before:.1f}%)')
     print(f'd bytes: {before:,} -> {after:,} ({100*after/before:.1f}%)')
+    print(f'tags dropped: {dropped:,}')
+    print(f'FILE   : {raw_before:,} -> {raw_after:,} bytes ({100*raw_after/raw_before:.1f}%)')
 
 if __name__ == '__main__':
     main()

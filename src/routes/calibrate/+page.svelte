@@ -29,8 +29,8 @@
     TRAINING: [-1, 0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20],
     WIND: [0, 10, 20, 30, 40, 50],
   };
-  const TYPE_FIELD: Record<string, keyof Tag> = { ZP: 'zp', TRAINING: 'zp', WEIGHTINDEX: 'wi', WIND: 'wind', OAT: 'oat' };
-  const TYPE_RANK: Record<string, number> = { ZP: 0, TRAINING: 1, WEIGHTINDEX: 2, WIND: 3, OAT: 0 };
+  const TYPE_FIELD: Record<string, keyof Tag> = { ZP: 'zp', TRAINING: 'zp', WEIGHTINDEX: 'wi', WIND: 'wind', OAT: 'oat', DRAG: 'drag' };
+  const TYPE_RANK: Record<string, number> = { ZP: 0, TRAINING: 1, WEIGHTINDEX: 2, WIND: 3, OAT: 0, DRAG: 0 };
 
   let lookup = $state<any>(null);
   let figList = $state<{ num: string; family: string; tagged: boolean }[]>([]);
@@ -64,6 +64,7 @@
     flyaway: ['oat'],
     level_flight: ['weight'],
     roc: ['zp', 'wi'],
+    roc_derate: ['drag'],
     cruise: ['drag'],
     hover: ['oat'],
     height_loss: ['zp', 'wi', 'wind'],
@@ -506,8 +507,30 @@
     status = `auto-ROC · PA ${zpIdx.length} (ladder -2..20) · WI ${chains.length} lines (6..16) · verify`;
   }
 
+  // ── ROC de-rating auto-calibration (fig 9-53 family) ──────────────────────
+  // One fan of 25 curves = Drag index 1..25. X = Weight Index 16..6, Y = ROC
+  // de-rating 0..300 ft/min. Every curve spans the full WI axis and they fan
+  // out at the right end (max x); sorting by y there, descending, gives drag
+  // 1..25 (verified: reproduces the 9-53 hand tags exactly — test_roc_derate.py).
+  const DRAG_LADDER = Array.from({ length: 25 }, (_, k) => k + 1); // 1..25
+  const yAtMaxX = (c: Cand) => { let mx = -Infinity, y = 0; for (const p of c.pts) if (p.x > mx) { mx = p.x; y = p.y; } return y; };
+  function autoRocDerate() {
+    const idxs = candidates.map((_, i) => i).filter((i) => !dismissed.has(i) && isDiagonal(candidates[i]));
+    if (!idxs.length) { status = 'no curves'; return; }
+    idxs.sort((a, b) => yAtMaxX(candidates[b]) - yAtMaxX(candidates[a])); // high y → drag 1
+    idxs.forEach((i, k) => {
+      const drag = DRAG_LADDER[k] ?? null;
+      candidates[i].type = 'DRAG'; candidates[i].order = k;
+      tags[i] = { ...emptyTag(), drag };
+      candidates[i].el.classList.toggle('tagged', drag != null);
+    });
+    candidates = [...candidates];
+    status = `auto-ROC-derate · ${idxs.length} drag lines (1..${idxs.length}) · verify`;
+  }
+
   function prefill() {
     if (family === 'roc') { autoRoc(); return; }
+    if (family === 'roc_derate') { autoRocDerate(); return; }
     if (!graph) { status = 'no graph block — manual only'; return; }
     const groups: Record<string, number[]> = {};
     candidates.forEach((c, i) => { if (dismissed.has(i)) { c.type = null; return; } c.type = classifyType(c); if (c.type) (groups[c.type] ||= []).push(i); });
@@ -785,6 +808,7 @@
   .badge { font-size: 9px; font-weight: 700; padding: 1px 4px; border-radius: 3px; margin-right: 4px; color: #fff; vertical-align: middle; }
   .t-ZP, .t-OAT { background: #1565c0; } .t-TRAINING { background: #00838f; }
   .t-WEIGHTINDEX { background: #2e7d32; } .t-WIND { background: #6a1b9a; }
+  .t-DRAG { background: #b8860b; }
   .t-dup { background: #555; opacity: 0.6; }
   .calib { border: 1px solid #3a3a3a; border-radius: 4px; padding: 6px 8px; display: flex; flex-direction: column; gap: 3px; }
   .calhdr { color: #e91e63; font-size: 12px; } .calhdr .meta { color: #888; font-weight: 400; }

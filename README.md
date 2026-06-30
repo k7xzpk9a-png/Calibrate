@@ -34,11 +34,17 @@ Usage :
     python3 extract_curves.py [PDF] --svg         # plain SVG (no gzip)
 ```
 
-Compress lookup.json by RDP-simplifying every tagged-curve `d` path.
+Optimize lookup.json: RDP-simplify every tagged-curve `d` path AND strip the
+authoring-only tags the runtime never reads, then minify.
 ```
-  python3 rdp_compress.py [epsilon] [decimals]
+  python3 optimize.py [epsilon] [decimals]
 ```
 
-Reads lookup.json, writes rdp_lookup.json. epsilon is in viewBox units
-(default 0.05 = very small; curves are within a 595x842 page). Only
-`figs[*].tagged.curves[*].d` is touched; everything else is copied verbatim.
+Reads `static/lookup.json`, writes `lookup.optimized.json` (minified). epsilon is
+in viewBox units (default 0.05 = very small; curves are within a 595x842 page).
+Idempotent — re-running on an already-optimized file is a no-op for paths.
+
+Dropped tags (unused by nh90-svelte/lookupTable.ts): `curve.id`, `tagged.source`,
+`tagged.fig`, `tagged.viewBox`. Everything else — incl. `tagged.calibration` and
+any unknown keys — is copied verbatim. Promote with
+`cp lookup.optimized.json static/lookup.json`.
