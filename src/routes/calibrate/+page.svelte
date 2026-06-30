@@ -33,7 +33,10 @@
   const TYPE_RANK: Record<string, number> = { ZP: 0, TRAINING: 1, WEIGHTINDEX: 2, WIND: 3, OAT: 0, DRAG: 0 };
 
   let lookup = $state<any>(null);
-  let figList = $state<{ num: string; family: string; tagged: boolean }[]>([]);
+  let figList = $state<{ num: string; family: string; tagged: boolean; untagged: number | null }[]>([]);
+  // live untagged-candidate count per fig we've opened this session (overrides the
+  // persisted count below until next save). null/absent = unknown without opening.
+  let untaggedMap = $state<Record<string, number>>({});
   let filter = $state('');
   let figNum = $state('');
   let status = $state('Loading lookup…');
@@ -155,21 +158,92 @@
       num,
       family: f.family ?? '?',
       tagged: !!f.tagged,
+      untagged: f.tagged?.untagged ?? null,
     }));
     status = `${figList.length} figs`;
   });
+
+  // ── whole-list scan: flag every fig's untagged-candidate count ────────────
+  // For unopened figs we can't know session-dismissed artifacts, so estimate
+  // candidates from the svgz directly: count #303281 paths whose bbox slopes
+  // both ways (≥5u) — same isDiagonal rule that drops axis/grid H/V lines —
+  // then subtract the saved curve count. Persisted/live counts win over this.
+  let scanning = $state(false);
+  // abs-coord bbox from a path `d` (M m L l H h V v C c S s; curve = endpoints).
+  function bboxOfD(d: string) {
+    const t = d.match(/[MmLlHhVvCcSsZz]|-?\d*\.?\d+/g) ?? [];
+    let i = 0, x = 0, y = 0, sx = 0, sy = 0, cmd = '', first = true;
+    let minx = Infinity, maxx = -Infinity, miny = Infinity, maxy = -Infinity;
+    const num = () => parseFloat(t[i++]);
+    const put = () => { if (x < minx) minx = x; if (x > maxx) maxx = x; if (y < miny) miny = y; if (y > maxy) maxy = y; };
+    while (i < t.length) {
+      if (/[A-Za-z]/.test(t[i])) { cmd = t[i++]; if (cmd === 'Z' || cmd === 'z') { x = sx; y = sy; put(); continue; } }
+      switch (cmd) {
+        case 'M': x = num(); y = num(); break;
+        case 'm': x += num(); y += num(); break;
+        case 'L': x = num(); y = num(); break;
+        case 'l': x += num(); y += num(); break;
+        case 'H': x = num(); break;  case 'h': x += num(); break;
+        case 'V': y = num(); break;  case 'v': y += num(); break;
+        case 'C': num(); num(); num(); num(); x = num(); y = num(); break;
+        case 'c': num(); num(); num(); num(); x += num(); y += num(); break;
+        case 'S': num(); num(); x = num(); y = num(); break;
+        case 's': num(); num(); x += num(); y += num(); break;
+        default: i++; continue;
+      }
+      if (first) { sx = x; sy = y; first = false; }
+      put();
+    }
+    return { minx, maxx, miny, maxy };
+  }
+  function countCurves(text: string): number {
+    let n = 0;
+    for (const tag of text.match(/<path\b[^>]*>/g) ?? []) {
+      if (!tag.includes('#303281')) continue;
+      const dm = tag.match(/\bd="([^"]*)"/);
+      if (!dm) continue;
+      const b = bboxOfD(dm[1]);
+      if (Math.min(b.maxx - b.minx, b.maxy - b.miny) >= 5) n++; // diagonal = real curve
+    }
+    return n;
+  }
+  async function scanAll() {
+    if (scanning) return;
+    scanning = true;
+    const todo = figList.filter((f) => untaggedMap[f.num] == null && f.untagged == null);
+    const total = todo.length;
+    let done = 0;
+    const worker = async () => {
+      for (let f = todo.pop(); f; f = todo.pop()) {
+        const text = await fetchSvgText(f.num).catch(() => null);
+        if (text) {
+          const saved = lookup?.figs?.[f.num]?.tagged?.curves?.length ?? 0;
+          untaggedMap[f.num] = Math.max(0, countCurves(text) - saved);
+        }
+        if (++done % 15 === 0) status = `scanning… ${done}/${total}`;
+      }
+    };
+    await Promise.all(Array.from({ length: 8 }, worker));
+    scanning = false;
+    const flagged = figList.filter((f) => (untaggedMap[f.num] ?? f.untagged ?? 0) > 0).length;
+    status = `scan done · ${flagged} figs with untagged curves`;
+  }
+
+  async function fetchSvgText(num: string): Promise<string | null> {
+    const res = await fetch(`${base}/svgz/${num}.svgz`);
+    if (!res.ok) return null;
+    const buf = new Uint8Array(await res.arrayBuffer());
+    return buf[0] === 0x1f && buf[1] === 0x8b
+      ? await new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'))).text()
+      : new TextDecoder().decode(buf);
+  }
 
   async function openFig(num: string) {
     figNum = num;
     selected = null;
     tags = {};
-    const res = await fetch(`${base}/svgz/${num}.svgz`);
-    if (!res.ok) { status = `no svg for ${num}`; return; }
-    const buf = new Uint8Array(await res.arrayBuffer());
-    const text =
-      buf[0] === 0x1f && buf[1] === 0x8b
-        ? await new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'))).text()
-        : new TextDecoder().decode(buf);
+    const text = await fetchSvgText(num);
+    if (text == null) { status = `no svg for ${num}`; return; }
 
     stage.innerHTML = text;
     svg = stage.querySelector('svg');
@@ -683,7 +757,8 @@
     const calibration = axes
       ? Object.fromEntries(axes.map((ax) => [ax.id, manualCal[ax.id].map((p) => (p.x != null ? { x: p.x, y: p.y, value: p.value } : null))]))
       : undefined;
-    const tagged = { source: 'calibrate', fig: figNum, viewBox: vb0, ...(calibration ? { calibration } : {}), curves };
+    const untagged = candidates.length - dismissed.size - curves.length;
+    const tagged = { source: 'calibrate', fig: figNum, viewBox: vb0, untagged, ...(calibration ? { calibration } : {}), curves };
     const res = await fetch(`${base}/calibrate/save`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
@@ -693,11 +768,15 @@
     if (res.ok) {
       status = `saved ${out.curves} curves → lookup.json`;
       lookup.figs[figNum].tagged = tagged;
-      figList = figList.map((f) => (f.num === figNum ? { ...f, tagged: true } : f));
+      figList = figList.map((f) => (f.num === figNum ? { ...f, tagged: true, untagged } : f));
     } else status = `save failed: ${out.message || res.status}`;
   }
 
   let taggedCount = $derived(candidates.filter((_, i) => isTagged(tags[i])).length);
+  // keep the open fig's remaining-untagged count live in the fig list
+  $effect(() => {
+    if (figNum) untaggedMap[figNum] = candidates.length - dismissed.size - taggedCount;
+  });
   // display order: dismissed artifacts hidden; grouped by panel, then spatial order
   let listOrder = $derived(
     candidates
@@ -729,9 +808,13 @@
     <input class="filter" placeholder="filter figs (number or family)" bind:value={filter} />
     <select size="10" class="figs" onchange={(e) => openFig((e.target as HTMLSelectElement).value)}>
       {#each shown as f (f.num)}
-        <option value={f.num} selected={f.num === figNum}>{f.tagged ? '✓ ' : ''}{f.num} · {f.family}</option>
+        {@const u = untaggedMap[f.num] ?? f.untagged}
+        <option value={f.num} selected={f.num === figNum}>{u == null ? (f.tagged ? '✓ ' : '') : u > 0 ? `⚠${u} ` : '✓ '}{f.num} · {f.family}</option>
       {/each}
     </select>
+    <button type="button" class="ghost mini" onclick={scanAll} disabled={scanning}>
+      {scanning ? 'scanning…' : '⚠ scan all for untagged'}
+    </button>
 
     {#if figNum}
       <div class="bar">
