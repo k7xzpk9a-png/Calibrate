@@ -80,6 +80,12 @@
       { id: 'oat', label: 'OAT (°C)', defaults: [-40, 50] },
       { id: 'wi', label: 'WI ×1000', defaults: [6000, 16000] },
     ],
+    // fig 9-53 has no upstream graph block → pick axis anchors by hand.
+    // X = Weight Index 16..6, Y = ROC de-rating 0..300 ft/min.
+    roc_derate: [
+      { id: 'wi', label: 'WI', defaults: [16, 6] },
+      { id: 'deRating', label: 'ROC de-rate (ft/min)', defaults: [0, 300] },
+    ],
   };
   let axes = $derived(AXES[family] ?? null);
   // axisId → two endpoints. value is always set (editable); x/y in viewBox coords
